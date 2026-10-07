@@ -1,47 +1,16 @@
 import { experimental_upgradeWebSocket } from '@vercel/functions'
 import { getDatabase } from '../server/mongodb.js'
 
-const sockets = new Set()
-let pollTimer = null
-let polling = false
-let lastFingerprint = null
 const ANNOUNCEMENT_ID = 'homepage-announcement'
-const POLL_MS = 1200
 
 function toClientAnnouncement(document) {
   return {
     type: 'announcement',
     enabled: Boolean(document?.enabled && document?.text),
     text: typeof document?.text === 'string' ? document.text : '',
-    updatedAt: document?.updatedAt instanceof Date ? document.updatedAt.toISOString() : document?.updatedAt || null,
-  }
-}
-
-function fingerprint(document) {
-  const updatedAt = document?.updatedAt instanceof Date
-    ? document.updatedAt.toISOString()
-    : document?.updatedAt || ''
-
-  return JSON.stringify({
-    text: document?.text || '',
-    enabled: Boolean(document?.enabled),
-    updatedAt,
-  })
-}
-
-function send(ws, payload) {
-  try {
-    if (ws.readyState === 1) {
-      ws.send(JSON.stringify(payload))
-    }
-  } catch {
-    sockets.delete(ws)
-  }
-}
-
-function broadcast(payload) {
-  for (const ws of sockets) {
-    send(ws, payload)
+    updatedAt: document?.updatedAt instanceof Date
+      ? document.updatedAt.toISOString()
+      : document?.updatedAt || null,
   }
 }
 
@@ -53,105 +22,51 @@ async function readAnnouncement() {
   )
 }
 
-async function pollAnnouncement() {
-  if (polling || sockets.size === 0) {
-    return
-  }
-
-  polling = true
-
+function send(ws, payload) {
   try {
-    const document = await readAnnouncement()
-    const nextFingerprint = fingerprint(document)
-
-    if (lastFingerprint === null) {
-      lastFingerprint = nextFingerprint
-    } else if (nextFingerprint !== lastFingerprint) {
-      lastFingerprint = nextFingerprint
-      broadcast(toClientAnnouncement(document))
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify(payload))
     }
   } catch {
-    // Keep the socket alive. The next interval retries automatically.
-  } finally {
-    polling = false
+    // The next reconnect will create a fresh connection.
   }
-}
-
-function startPolling() {
-  if (pollTimer || sockets.size === 0) {
-    return
-  }
-
-  pollTimer = setInterval(() => {
-    void pollAnnouncement()
-  }, POLL_MS)
-
-  void pollAnnouncement()
-}
-
-function stopPollingWhenIdle() {
-  if (sockets.size > 0) {
-    return
-  }
-
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
-
-  lastFingerprint = null
-}
-
-let heartbeatTimer = null
-
-function startHeartbeat() {
-  if (heartbeatTimer) {
-    return
-  }
-
-  heartbeatTimer = setInterval(() => {
-    for (const ws of sockets) {
-      try {
-        if (ws.readyState === 1) {
-          ws.ping()
-        }
-      } catch {
-        sockets.delete(ws)
-      }
-    }
-
-    stopPollingWhenIdle()
-
-    if (sockets.size === 0) {
-      clearInterval(heartbeatTimer)
-      heartbeatTimer = null
-    }
-  }, 20000)
 }
 
 export function GET() {
   return experimental_upgradeWebSocket(async (ws) => {
-    sockets.add(ws)
-    startHeartbeat()
-    startPolling()
+    ws.on('message', async (raw) => {
+      let message
 
-    ws.on('message', () => {
-      // The public socket is receive-only. Ignore unexpected client payloads.
-    })
+      try {
+        message = JSON.parse(raw.toString())
+      } catch {
+        return
+      }
 
-    ws.on('close', () => {
-      sockets.delete(ws)
-      stopPollingWhenIdle()
+      if (message?.type !== 'sync') {
+        return
+      }
+
+      try {
+        const document = await readAnnouncement()
+        const updatedAt = document?.updatedAt instanceof Date
+          ? document.updatedAt.toISOString()
+          : document?.updatedAt || null
+
+        if (!message.updatedAt || message.updatedAt !== updatedAt) {
+          send(ws, toClientAnnouncement(document))
+        }
+      } catch {
+        // Keep the connection open; the client will retry the next sync.
+      }
     })
 
     ws.on('error', () => {
-      sockets.delete(ws)
-      stopPollingWhenIdle()
+      // The client owns reconnection; nothing else is required here.
     })
 
     try {
       const document = await readAnnouncement()
-      lastFingerprint = fingerprint(document)
       send(ws, toClientAnnouncement(document))
     } catch {
       send(ws, {
