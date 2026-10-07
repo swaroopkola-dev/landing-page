@@ -2,10 +2,11 @@ import { experimental_upgradeWebSocket } from '@vercel/functions'
 import { getDatabase } from '../server/mongodb.js'
 
 const sockets = new Set()
-let changeStream = null
-let listenerRetryTimer = null
-let heartbeatTimer = null
+let pollTimer = null
+let polling = false
+let lastFingerprint = null
 const ANNOUNCEMENT_ID = 'homepage-announcement'
+const POLL_MS = 1200
 
 function toClientAnnouncement(document) {
   return {
@@ -14,6 +15,18 @@ function toClientAnnouncement(document) {
     text: typeof document?.text === 'string' ? document.text : '',
     updatedAt: document?.updatedAt instanceof Date ? document.updatedAt.toISOString() : document?.updatedAt || null,
   }
+}
+
+function fingerprint(document) {
+  const updatedAt = document?.updatedAt instanceof Date
+    ? document.updatedAt.toISOString()
+    : document?.updatedAt || ''
+
+  return JSON.stringify({
+    text: document?.text || '',
+    enabled: Boolean(document?.enabled),
+    updatedAt,
+  })
 }
 
 function send(ws, payload) {
@@ -32,112 +45,68 @@ function broadcast(payload) {
   }
 }
 
-async function sendCurrentAnnouncement(ws) {
+async function readAnnouncement() {
   const database = await getDatabase()
-  const document = await database.collection('site_content').findOne(
+  return database.collection('site_content').findOne(
     { _id: ANNOUNCEMENT_ID },
     { projection: { text: 1, enabled: 1, updatedAt: 1 } },
   )
-
-  send(ws, toClientAnnouncement(document))
 }
 
-async function startChangeStream() {
-  if (changeStream || listenerRetryTimer || sockets.size === 0) {
+async function pollAnnouncement() {
+  if (polling || sockets.size === 0) {
     return
   }
+
+  polling = true
 
   try {
-    const database = await getDatabase()
-    changeStream = database.collection('site_content').watch(
-      [{ $match: { 'documentKey._id': ANNOUNCEMENT_ID } }],
-      { fullDocument: 'updateLookup' },
-    )
+    const document = await readAnnouncement()
+    const nextFingerprint = fingerprint(document)
 
-    changeStream.on('change', (change) => {
-      if (change.operationType === 'delete') {
-        broadcast({
-          type: 'announcement',
-          enabled: false,
-          text: '',
-          updatedAt: new Date().toISOString(),
-        })
-        return
-      }
-
-      broadcast(toClientAnnouncement(change.fullDocument))
-    })
-
-    changeStream.on('error', () => {
-      changeStream = null
-      scheduleChangeStreamRetry()
-    })
-
-    changeStream.on('close', () => {
-      changeStream = null
-      scheduleChangeStreamRetry()
-    })
+    if (lastFingerprint === null) {
+      lastFingerprint = nextFingerprint
+    } else if (nextFingerprint !== lastFingerprint) {
+      lastFingerprint = nextFingerprint
+      broadcast(toClientAnnouncement(document))
+    }
   } catch {
-    changeStream = null
-    scheduleChangeStreamRetry()
+    // Keep the socket alive. The next interval retries automatically.
+  } finally {
+    polling = false
   }
 }
 
-function scheduleChangeStreamRetry() {
-  if (listenerRetryTimer || sockets.size === 0) {
+function startPolling() {
+  if (pollTimer || sockets.size === 0) {
     return
   }
 
-  listenerRetryTimer = setTimeout(() => {
-    listenerRetryTimer = null
-    startChangeStream()
-  }, 1500)
+  pollTimer = setInterval(() => {
+    void pollAnnouncement()
+  }, POLL_MS)
+
+  void pollAnnouncement()
 }
 
-function stopChangeStreamWhenIdle() {
+function stopPollingWhenIdle() {
   if (sockets.size > 0) {
     return
   }
 
-  clearTimeout(listenerRetryTimer)
-  listenerRetryTimer = null
-
-  if (changeStream) {
-    changeStream.close().catch(() => {})
-    changeStream = null
-  }
-}
-
-function startHeartbeat() {
-  if (heartbeatTimer) {
-    return
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
   }
 
-  heartbeatTimer = setInterval(() => {
-    for (const ws of sockets) {
-      try {
-        if (ws.readyState === 1) {
-          ws.ping()
-        }
-      } catch {
-        sockets.delete(ws)
-      }
-    }
-
-    stopChangeStreamWhenIdle()
-
-    if (sockets.size === 0) {
-      clearInterval(heartbeatTimer)
-      heartbeatTimer = null
-    }
-  }, 20000)
+  lastFingerprint = null
 }
 
 export function GET() {
   return experimental_upgradeWebSocket(async (ws) => {
     sockets.add(ws)
     startHeartbeat()
-    startChangeStream()
+    startPolling()
 
     ws.on('message', () => {
       // The public socket is receive-only. Ignore unexpected client payloads.
@@ -145,7 +114,7 @@ export function GET() {
 
     ws.on('close', () => {
       sockets.delete(ws)
-      stopChangeStreamWhenIdle()
+      stopPollingWhenIdle()
     })
 
     ws.on('error', () => {
@@ -154,7 +123,9 @@ export function GET() {
     })
 
     try {
-      await sendCurrentAnnouncement(ws)
+      const document = await readAnnouncement()
+      lastFingerprint = fingerprint(document)
+      send(ws, toClientAnnouncement(document))
     } catch {
       send(ws, {
         type: 'announcement',
