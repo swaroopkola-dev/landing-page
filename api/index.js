@@ -30,6 +30,11 @@ const attendanceSchema = z.object({
   attendanceStatus: z.enum(['came', 'did_not_come']),
 })
 
+const announcementSchema = z.object({
+  text: z.string().trim().max(180),
+  enabled: z.boolean(),
+})
+
 const rateWindowMs = 10 * 60 * 1000
 const maxRequestsPerWindow = 20
 const loginWindowMs = 15 * 60 * 1000
@@ -416,6 +421,94 @@ router.patch('/admin/bookings/:bookingId/attendance', requireAdmin, requireSameO
     return res.status(503).json({
       success: false,
       message: 'We could not save that attendance update. Please try again.',
+    })
+  }
+})
+
+
+router.get('/admin/announcement', requireAdmin, async (_req, res) => {
+  try {
+    const database = await getDatabase()
+    const announcement = await database.collection('site_content').findOne(
+      { _id: 'homepage-announcement' },
+      { projection: { _id: 0, text: 1, enabled: 1, updatedAt: 1, updatedBy: 1 } },
+    )
+
+    return res.status(200).json({
+      success: true,
+      announcement: announcement
+        ? {
+            text: announcement.text || '',
+            enabled: Boolean(announcement.enabled),
+            updatedAt: announcement.updatedAt || null,
+            updatedBy: announcement.updatedBy || null,
+          }
+        : {
+            text: '',
+            enabled: false,
+            updatedAt: null,
+            updatedBy: null,
+          },
+    })
+  } catch (error) {
+    console.error('Admin announcement load failed', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+
+    return res.status(503).json({
+      success: false,
+      message: 'The live message is temporarily unavailable.',
+    })
+  }
+})
+
+router.put('/admin/announcement', requireAdmin, requireSameOrigin, async (req, res) => {
+  const parsed = announcementSchema.safeParse(req.body)
+
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      message: 'Please enter a message up to 180 characters and choose whether it should be visible.',
+    })
+  }
+
+  const now = new Date()
+
+  try {
+    const database = await getDatabase()
+    await database.collection('site_content').updateOne(
+      { _id: 'homepage-announcement' },
+      {
+        $set: {
+          text: parsed.data.text,
+          enabled: parsed.data.enabled && parsed.data.text.length > 0,
+          updatedAt: now,
+          updatedBy: req.admin.username,
+        },
+        $setOnInsert: {
+          createdAt: now,
+        },
+      },
+      { upsert: true },
+    )
+
+    return res.status(200).json({
+      success: true,
+      announcement: {
+        text: parsed.data.text,
+        enabled: parsed.data.enabled && parsed.data.text.length > 0,
+        updatedAt: now,
+        updatedBy: req.admin.username,
+      },
+    })
+  } catch (error) {
+    console.error('Admin announcement update failed', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+
+    return res.status(503).json({
+      success: false,
+      message: 'We could not publish that message. Please try again.',
     })
   }
 })
