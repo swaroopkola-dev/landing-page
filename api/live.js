@@ -102,6 +102,33 @@ function stopPollingWhenIdle() {
   lastFingerprint = null
 }
 
+let heartbeatTimer = null
+
+function startHeartbeat() {
+  if (heartbeatTimer) {
+    return
+  }
+
+  heartbeatTimer = setInterval(() => {
+    for (const ws of sockets) {
+      try {
+        if (ws.readyState === 1) {
+          ws.ping()
+        }
+      } catch {
+        sockets.delete(ws)
+      }
+    }
+
+    stopPollingWhenIdle()
+
+    if (sockets.size === 0) {
+      clearInterval(heartbeatTimer)
+      heartbeatTimer = null
+    }
+  }, 20000)
+}
+
 export function GET() {
   return experimental_upgradeWebSocket(async (ws) => {
     sockets.add(ws)
@@ -119,7 +146,7 @@ export function GET() {
 
     ws.on('error', () => {
       sockets.delete(ws)
-      stopChangeStreamWhenIdle()
+      stopPollingWhenIdle()
     })
 
     try {
