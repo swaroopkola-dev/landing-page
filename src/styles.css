@@ -447,7 +447,7 @@ blockquote {
 .booking-form { margin-top: 42px; display: grid; gap: 18px; }
 .booking-form label { display: grid; gap: 8px; font-size: 10px; text-transform: uppercase; letter-spacing: .11em; color: #78746d; }
 .booking-form input, .booking-form select, .booking-form textarea {
-  width: 100%; background: #ece7dc; border: 1px solid rgba(25,25,20,.13); border-radius: 0;
+  width: 100%; background: #ece7dc; border: 1px solid rgba(25,25,20,.13); border-radius: 8px;
   padding: 14px 13px; font-size: 13px; color: var(--ink); outline: none; resize: vertical;
 }
 .booking-form input:focus, .booking-form select:focus, .booking-form textarea:focus { border-color: rgba(25,25,20,.45); }
@@ -544,4 +544,16 @@ blockquote {
   .lightbox-nav { top: auto; bottom: 22px; transform: none; }
   .lightbox-nav.left { left: auto; right: 76px; }
   .lightbox-nav.right { right: 22px; }
+}
+
+.booking-form button:disabled { opacity: .68; cursor: wait; transform: none; }
+.booking-error {
+  margin: 0;
+  padding: 11px 13px;
+  border: 1px solid rgba(160, 73, 52, .25);
+  border-radius: 8px;
+  background: rgba(160, 73, 52, .06);
+  color: #7e3e2d;
+  font-size: 12px;
+  line-height: 1.5;
 }
