@@ -29,6 +29,10 @@ export default function LiveAnnouncement() {
   const [announcement, setAnnouncement] = useState(null)
 
   useEffect(() => {
+    if (window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/')) {
+      return undefined
+    }
+
     let socket
     let reconnectTimer
     let reconnectDelay = 500
