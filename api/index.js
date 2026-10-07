@@ -26,9 +26,19 @@ const bookingSchema = z.object({
   note: z.string().trim().max(500).optional().default(''),
 })
 
+const attendanceSchema = z.object({
+  attendanceStatus: z.enum(['came', 'did_not_come']),
+})
+
 const rateWindowMs = 10 * 60 * 1000
 const maxRequestsPerWindow = 20
+const loginWindowMs = 15 * 60 * 1000
+const maxLoginAttemptsPerWindow = 10
 const rateBuckets = new Map()
+const loginBuckets = new Map()
+
+const ADMIN_SESSION_COOKIE = 'ember_admin_session'
+const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000
 
 function requestKey(req) {
   return req.ip || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 'unknown'
@@ -55,10 +65,140 @@ function rateLimit(req, res, next) {
   return next()
 }
 
+function loginRateLimit(req, res, next) {
+  const now = Date.now()
+  const key = requestKey(req)
+  const bucket = loginBuckets.get(key)
+
+  if (!bucket || now - bucket.startedAt >= loginWindowMs) {
+    loginBuckets.set(key, { count: 1, startedAt: now })
+    return next()
+  }
+
+  if (bucket.count >= maxLoginAttemptsPerWindow) {
+    return res.status(429).json({
+      success: false,
+      message: 'Too many login attempts. Please try again later.',
+    })
+  }
+
+  bucket.count += 1
+  return next()
+}
+
 function isRealCalendarDate(value) {
   const [year, month, day] = value.split('-').map(Number)
   const date = new Date(Date.UTC(year, month - 1, day))
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+}
+
+function getAdminConfig() {
+  return {
+    username: process.env.ADMIN_USERNAME || '',
+    password: process.env.ADMIN_PASSWORD || '',
+    secret: process.env.ADMIN_SESSION_SECRET || '',
+  }
+}
+
+function safeEqual(left, right) {
+  const leftBuffer = Buffer.from(left)
+  const rightBuffer = Buffer.from(right)
+
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false
+  }
+
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer)
+}
+
+function signSession(payload) {
+  const { secret } = getAdminConfig()
+  return crypto.createHmac('sha256', secret).update(payload).digest('base64url')
+}
+
+function createAdminSession(username) {
+  const payload = Buffer.from(JSON.stringify({
+    username,
+    expiresAt: Date.now() + ADMIN_SESSION_TTL_MS,
+  })).toString('base64url')
+
+  return `${payload}.${signSession(payload)}`
+}
+
+function parseCookies(header = '') {
+  return header.split(';').reduce((cookies, part) => {
+    const separator = part.indexOf('=')
+    if (separator === -1) return cookies
+    const key = part.slice(0, separator).trim()
+    const value = part.slice(separator + 1).trim()
+    cookies[key] = decodeURIComponent(value)
+    return cookies
+  }, {})
+}
+
+function readAdminSession(req) {
+  const { username, secret } = getAdminConfig()
+  if (!username || !secret) return null
+
+  const cookie = parseCookies(req.headers.cookie || '')[ADMIN_SESSION_COOKIE]
+  if (!cookie) return null
+
+  const [payload, signature] = cookie.split('.')
+  if (!payload || !signature) return null
+
+  const expectedSignature = signSession(payload)
+  if (!safeEqual(signature, expectedSignature)) return null
+
+  try {
+    const session = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    if (session.username !== username || !Number.isFinite(session.expiresAt) || session.expiresAt <= Date.now()) {
+      return null
+    }
+
+    return session
+  } catch {
+    return null
+  }
+}
+
+function setAdminCookie(res, token) {
+  res.setHeader(
+    'Set-Cookie',
+    `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${Math.floor(ADMIN_SESSION_TTL_MS / 1000)}`,
+  )
+}
+
+function clearAdminCookie(res) {
+  res.setHeader(
+    'Set-Cookie',
+    `${ADMIN_SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`,
+  )
+}
+
+function requireSameOrigin(req, res, next) {
+  const origin = req.get('origin')
+  if (!origin) return next()
+
+  const expectedOrigin = `${req.protocol}://${req.get('host')}`
+  if (origin !== expectedOrigin) {
+    return res.status(403).json({ success: false, message: 'Request origin is not allowed.' })
+  }
+
+  return next()
+}
+
+function requireAdmin(req, res, next) {
+  const session = readAdminSession(req)
+  if (!session) {
+    return res.status(401).json({
+      success: false,
+      authenticated: false,
+      message: 'Admin authentication required.',
+    })
+  }
+
+  req.admin = session
+  return next()
 }
 
 router.get('/health', (_req, res) => {
@@ -91,6 +231,7 @@ router.post('/bookings', rateLimit, async (req, res) => {
     await database.collection('restaurant').insertOne({
       bookingId,
       status: 'confirmed',
+      attendanceStatus: 'pending',
       name: parsed.data.name,
       date: parsed.data.date,
       time: parsed.data.time,
@@ -116,6 +257,150 @@ router.post('/bookings', rateLimit, async (req, res) => {
     return res.status(503).json({
       success: false,
       message: 'We could not complete the booking right now. Please try again in a moment.',
+    })
+  }
+})
+
+router.post('/admin/login', loginRateLimit, requireSameOrigin, (req, res) => {
+  const loginSchema = z.object({
+    username: z.string().min(1).max(80),
+    password: z.string().min(1).max(200),
+  })
+  const parsed = loginSchema.safeParse(req.body)
+  const config = getAdminConfig()
+
+  if (!config.username || !config.password || !config.secret) {
+    return res.status(503).json({
+      success: false,
+      message: 'Admin access is not configured.',
+    })
+  }
+
+  if (!parsed.success || !safeEqual(parsed.data.username, config.username) || !safeEqual(parsed.data.password, config.password)) {
+    return res.status(401).json({
+      success: false,
+      authenticated: false,
+      message: 'Invalid admin credentials.',
+    })
+  }
+
+  setAdminCookie(res, createAdminSession(config.username))
+  return res.status(200).json({
+    success: true,
+    authenticated: true,
+  })
+})
+
+router.get('/admin/session', (req, res) => {
+  const session = readAdminSession(req)
+  return res.status(200).json({
+    success: true,
+    authenticated: Boolean(session),
+    username: session?.username || null,
+  })
+})
+
+router.post('/admin/logout', requireSameOrigin, (_req, res) => {
+  clearAdminCookie(res)
+  return res.status(200).json({
+    success: true,
+    authenticated: false,
+  })
+})
+
+router.get('/admin/bookings', requireAdmin, async (req, res) => {
+  const rawLimit = Number.parseInt(req.query.limit, 10)
+  const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 200) : 100
+
+  try {
+    const database = await getDatabase()
+    const bookings = await database.collection('restaurant').find(
+      { environment: 'production', source: 'website' },
+      {
+        projection: {
+          _id: 0,
+          bookingId: 1,
+          status: 1,
+          attendanceStatus: 1,
+          attendanceMarkedAt: 1,
+          attendanceMarkedBy: 1,
+          name: 1,
+          date: 1,
+          time: 1,
+          guests: 1,
+          occasion: 1,
+          note: 1,
+          createdAt: 1,
+        },
+        limit,
+        sort: { createdAt: -1 },
+      },
+    ).toArray()
+
+    return res.status(200).json({
+      success: true,
+      bookings,
+      count: bookings.length,
+    })
+  } catch (error) {
+    console.error('Admin booking history failed', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+
+    return res.status(503).json({
+      success: false,
+      message: 'Booking history is temporarily unavailable.',
+    })
+  }
+})
+
+router.patch('/admin/bookings/:bookingId/attendance', requireAdmin, requireSameOrigin, async (req, res) => {
+  const bookingId = String(req.params.bookingId || '')
+  const parsed = attendanceSchema.safeParse(req.body)
+
+  if (!/^EL-\d{8}-[A-F0-9]{8}$/.test(bookingId) || !parsed.success) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid attendance update.',
+    })
+  }
+
+  try {
+    const database = await getDatabase()
+    const update = {
+      $set: {
+        attendanceStatus: parsed.data.attendanceStatus,
+        attendanceMarkedAt: new Date(),
+        attendanceMarkedBy: req.admin.username,
+      },
+    }
+
+    const result = await database.collection('restaurant').updateOne(
+      { bookingId, environment: 'production', source: 'website' },
+      update,
+    )
+
+    if (!result.matchedCount) {
+      return res.status(404).json({
+        success: false,
+        message: 'Reservation not found.',
+      })
+    }
+
+    return res.status(200).json({
+      success: true,
+      bookingId,
+      attendanceStatus: parsed.data.attendanceStatus,
+    })
+  } catch (error) {
+    console.error('Attendance update failed', {
+      error: error instanceof Error ? error.message : String(error),
+      bookingId,
+    })
+
+    return res.status(503).json({
+      success: false,
+      message: 'We could not save that attendance update. Please try again.',
     })
   }
 })
