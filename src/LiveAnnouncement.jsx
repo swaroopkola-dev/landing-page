@@ -35,8 +35,10 @@ export default function LiveAnnouncement() {
 
     let socket
     let reconnectTimer
+    let syncTimer
     let reconnectDelay = 500
     let cancelled = false
+    const announcementRef = { current: null }
 
     const connect = () => {
       if (cancelled) return
@@ -50,11 +52,33 @@ export default function LiveAnnouncement() {
 
       socket.addEventListener('message', (event) => {
         try {
-          applyAnnouncement(setAnnouncement, JSON.parse(event.data))
+          const payload = JSON.parse(event.data)
+          applyAnnouncement((updater) => {
+            setAnnouncement((current) => {
+              const next = typeof updater === 'function' ? updater(current) : updater
+              announcementRef.current = next
+              return next
+            })
+          }, payload)
         } catch {
           // Ignore malformed public socket messages.
         }
       })
+
+      window.clearInterval(syncTimer)
+      syncTimer = window.setInterval(() => {
+        if (socket?.readyState !== WebSocket.OPEN) return
+
+        socket.send(JSON.stringify({
+          type: 'sync',
+          updatedAt: announcementRef.current?.updatedAt || null,
+        }))
+      }, 1500)
+
+      socket.send(JSON.stringify({
+        type: 'sync',
+        updatedAt: announcementRef.current?.updatedAt || null,
+      }))
 
       socket.addEventListener('close', () => {
         if (cancelled) return
@@ -74,6 +98,7 @@ export default function LiveAnnouncement() {
     return () => {
       cancelled = true
       window.clearTimeout(reconnectTimer)
+      window.clearInterval(syncTimer)
       socket?.close()
     }
   }, [])
