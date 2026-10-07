@@ -1,6 +1,6 @@
 import './AdminPanel.css'
 import { useEffect, useMemo, useState } from 'react'
-import { Check, LogIn, LogOut, RefreshCw, ShieldCheck, X } from 'lucide-react'
+import { Check, LogIn, LogOut, RefreshCw, Send, ShieldCheck, X } from 'lucide-react'
 
 function formatCreatedAt(value) {
   if (!value) return '—'
@@ -53,6 +53,11 @@ export default function AdminPanel() {
   const [loadError, setLoadError] = useState('')
   const [updatingBookingId, setUpdatingBookingId] = useState('')
   const [lastUpdated, setLastUpdated] = useState(null)
+  const [announcementText, setAnnouncementText] = useState('')
+  const [announcementEnabled, setAnnouncementEnabled] = useState(false)
+  const [announcementSaving, setAnnouncementSaving] = useState(false)
+  const [announcementError, setAnnouncementError] = useState('')
+  const [announcementSavedAt, setAnnouncementSavedAt] = useState(null)
 
   const counts = useMemo(() => ({
     total: bookings.length,
@@ -60,6 +65,77 @@ export default function AdminPanel() {
     came: bookings.filter((booking) => booking.attendanceStatus === 'came').length,
     noShow: bookings.filter((booking) => booking.attendanceStatus === 'did_not_come').length,
   }), [bookings])
+
+
+  const loadAnnouncement = async () => {
+    setAnnouncementError('')
+
+    try {
+      const response = await fetch('/api/admin/announcement', {
+        credentials: 'same-origin',
+        cache: 'no-store',
+      })
+      const result = await response.json().catch(() => ({}))
+
+      if (response.status === 401) {
+        setAuthenticated(false)
+        setBookings([])
+        return
+      }
+
+      if (!response.ok) {
+        throw new Error(result.message || 'Unable to load the live message.')
+      }
+
+      const announcement = result.announcement || {}
+      setAnnouncementText(typeof announcement.text === 'string' ? announcement.text : '')
+      setAnnouncementEnabled(Boolean(announcement.enabled))
+      setAnnouncementSavedAt(announcement.updatedAt ? new Date(announcement.updatedAt) : null)
+    } catch (error) {
+      setAnnouncementError(error instanceof Error ? error.message : 'Unable to load the live message.')
+    }
+  }
+
+  const saveAnnouncement = async () => {
+    if (announcementSaving) return
+
+    setAnnouncementSaving(true)
+    setAnnouncementError('')
+
+    try {
+      const response = await fetch('/api/admin/announcement', {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: announcementText,
+          enabled: announcementEnabled,
+        }),
+      })
+      const result = await response.json().catch(() => ({}))
+
+      if (response.status === 401) {
+        setAuthenticated(false)
+        setBookings([])
+        return
+      }
+
+      if (!response.ok) {
+        throw new Error(result.message || 'Unable to publish the live message.')
+      }
+
+      const announcement = result.announcement || {}
+      setAnnouncementText(typeof announcement.text === 'string' ? announcement.text : '')
+      setAnnouncementEnabled(Boolean(announcement.enabled))
+      setAnnouncementSavedAt(announcement.updatedAt ? new Date(announcement.updatedAt) : new Date())
+      setLastUpdated(new Date())
+    } catch (error) {
+      setAnnouncementError(error instanceof Error ? error.message : 'Unable to publish the live message.')
+    } finally {
+      setAnnouncementSaving(false)
+    }
+  }
+
 
   const loadBookings = async () => {
     setLoading(true)
@@ -118,6 +194,7 @@ export default function AdminPanel() {
   useEffect(() => {
     if (authenticated) {
       loadBookings()
+      loadAnnouncement()
     }
   }, [authenticated])
 
@@ -162,6 +239,10 @@ export default function AdminPanel() {
     setAuthenticated(false)
     setUsername('')
     setBookings([])
+    setAnnouncementText('')
+    setAnnouncementEnabled(false)
+    setAnnouncementSavedAt(null)
+    setAnnouncementError('')
   }
 
   const updateAttendance = async (bookingId, attendanceStatus) => {
@@ -286,6 +367,58 @@ export default function AdminPanel() {
       </section>
 
       {loadError ? <p className="admin-error admin-global-error" role="alert">{loadError}</p> : null}
+
+
+      <section className="admin-live-card">
+        <div className="admin-live-intro">
+          <p className="admin-eyebrow">Live on the website</p>
+          <h2>Write to the room.</h2>
+          <p>Publish a short house note at the top of the public site. Guests see it immediately without refreshing.</p>
+        </div>
+
+        <div className="admin-live-editor">
+          <label>
+            Message
+            <textarea
+              value={announcementText}
+              onChange={(event) => setAnnouncementText(event.target.value.slice(0, 180))}
+              maxLength="180"
+              rows="3"
+              placeholder="Tonight’s tasting menu is now available."
+            />
+          </label>
+
+          <div className="admin-live-toolbar">
+            <label className="admin-live-toggle">
+              <input
+                type="checkbox"
+                checked={announcementEnabled}
+                onChange={(event) => setAnnouncementEnabled(event.target.checked)}
+              />
+              <span>{announcementEnabled ? 'Visible to guests' : 'Hidden from guests'}</span>
+            </label>
+            <span className="admin-live-count">{announcementText.length} / 180</span>
+          </div>
+
+          <div className="admin-live-footer">
+            <div>
+              {announcementError ? <p className="admin-error admin-live-error" role="alert">{announcementError}</p> : null}
+              {!announcementError && announcementSavedAt ? (
+                <p className="admin-live-saved">Last published {formatCreatedAt(announcementSavedAt)}</p>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              className="admin-primary-button admin-live-send"
+              onClick={saveAnnouncement}
+              disabled={announcementSaving || !announcementText.trim() || !announcementEnabled}
+            >
+              <Send size={15} />
+              {announcementSaving ? 'Publishing…' : 'Send live update'}
+            </button>
+          </div>
+        </div>
+      </section>
 
       <section className="admin-history">
         <div className="admin-history-head">
