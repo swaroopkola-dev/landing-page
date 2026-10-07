@@ -48,6 +48,10 @@ export default function LiveAnnouncement() {
 
       socket.addEventListener('open', () => {
         reconnectDelay = 500
+        socket.send(JSON.stringify({
+          type: 'sync',
+          updatedAt: announcementRef.current?.updatedAt || null,
+        }))
       })
 
       socket.addEventListener('message', (event) => {
@@ -74,11 +78,6 @@ export default function LiveAnnouncement() {
           updatedAt: announcementRef.current?.updatedAt || null,
         }))
       }, 1500)
-
-      socket.send(JSON.stringify({
-        type: 'sync',
-        updatedAt: announcementRef.current?.updatedAt || null,
-      }))
 
       socket.addEventListener('close', () => {
         if (cancelled) return
