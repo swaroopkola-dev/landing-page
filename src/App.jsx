@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import AdminPanel from './AdminPanel.jsx'
 import {
   ArrowDown,
   ArrowRight,
@@ -80,6 +81,10 @@ const testimonials = [
 ]
 
 function App() {
+  if (window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/')) {
+    return <AdminPanel />
+  }
+
   const [activeMenu, setActiveMenu] = useState('dinner')
   const [menuOpen, setMenuOpen] = useState(false)
   const [bookingOpen, setBookingOpen] = useState(false)
