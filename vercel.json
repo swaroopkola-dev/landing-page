@@ -3,13 +3,23 @@
   "functions": {
     "api/index.js": {
       "maxDuration": 15,
-      "regions": ["bom1"]
+      "regions": [
+        "bom1"
+      ]
     }
   },
   "rewrites": [
     {
       "source": "/api/:path*",
       "destination": "/api/index.js"
+    },
+    {
+      "source": "/admin",
+      "destination": "/"
+    },
+    {
+      "source": "/admin/:path*",
+      "destination": "/"
     }
   ]
 }
