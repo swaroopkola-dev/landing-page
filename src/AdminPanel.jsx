@@ -411,7 +411,7 @@ export default function AdminPanel() {
               type="button"
               className="admin-primary-button admin-live-send"
               onClick={saveAnnouncement}
-              disabled={announcementSaving || !announcementText.trim() || !announcementEnabled}
+              disabled={announcementSaving}
             >
               <Send size={15} />
               {announcementSaving ? 'Publishing…' : 'Send live update'}
