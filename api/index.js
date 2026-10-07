@@ -39,6 +39,8 @@ const loginBuckets = new Map()
 
 const ADMIN_SESSION_COOKIE = 'ember_admin_session'
 const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000
+const ADMIN_PASSWORD_SALT = 'a0bba900c268806cc2687ff8e3361a90'
+const ADMIN_PASSWORD_HASH = '90795198681894de8f7c48a4a57092ea86c3b2b72ec2395cfafe34c406d53be94b772fe42f00498aa5e689b5f37e8d77c31df31315b8d18364b7f8af6a417691'
 
 function requestKey(req) {
   return req.ip || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 'unknown'
@@ -92,12 +94,8 @@ function isRealCalendarDate(value) {
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
 }
 
-function getAdminConfig() {
-  return {
-    username: process.env.ADMIN_USERNAME || '',
-    password: process.env.ADMIN_PASSWORD || '',
-    secret: process.env.ADMIN_SESSION_SECRET || '',
-  }
+function getAdminUsername() {
+  return process.env.ADMIN_USERNAME || 'admin'
 }
 
 function safeEqual(left, right) {
@@ -111,9 +109,26 @@ function safeEqual(left, right) {
   return crypto.timingSafeEqual(leftBuffer, rightBuffer)
 }
 
+function getAdminPasswordHash(password) {
+  return crypto.scryptSync(
+    password,
+    ADMIN_PASSWORD_SALT,
+    64,
+    { N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024 },
+  ).toString('hex')
+}
+
+function verifyAdminPassword(password) {
+  return safeEqual(getAdminPasswordHash(password), ADMIN_PASSWORD_HASH)
+}
+
+function getSessionSecret() {
+  const mongoUri = process.env.MONGODB_URI || ''
+  return crypto.createHash('sha256').update('ember-leaf-admin-session:v1').update(mongoUri).digest('hex')
+}
+
 function signSession(payload) {
-  const { secret } = getAdminConfig()
-  return crypto.createHmac('sha256', secret).update(payload).digest('base64url')
+  return crypto.createHmac('sha256', getSessionSecret()).update(payload).digest('base64url')
 }
 
 function createAdminSession(username) {
@@ -137,8 +152,8 @@ function parseCookies(header = '') {
 }
 
 function readAdminSession(req) {
-  const { username, secret } = getAdminConfig()
-  if (!username || !secret) return null
+  const username = getAdminUsername()
+  if (!username || !process.env.MONGODB_URI) return null
 
   const cookie = parseCookies(req.headers.cookie || '')[ADMIN_SESSION_COOKIE]
   if (!cookie) return null
@@ -267,16 +282,16 @@ router.post('/admin/login', loginRateLimit, requireSameOrigin, (req, res) => {
     password: z.string().min(1).max(200),
   })
   const parsed = loginSchema.safeParse(req.body)
-  const config = getAdminConfig()
+  const username = getAdminUsername()
 
-  if (!config.username || !config.password || !config.secret) {
+  if (!process.env.MONGODB_URI) {
     return res.status(503).json({
       success: false,
       message: 'Admin access is not configured.',
     })
   }
 
-  if (!parsed.success || !safeEqual(parsed.data.username, config.username) || !safeEqual(parsed.data.password, config.password)) {
+  if (!parsed.success || !safeEqual(parsed.data.username, username) || !verifyAdminPassword(parsed.data.password)) {
     return res.status(401).json({
       success: false,
       authenticated: false,
@@ -284,7 +299,7 @@ router.post('/admin/login', loginRateLimit, requireSameOrigin, (req, res) => {
     })
   }
 
-  setAdminCookie(res, createAdminSession(config.username))
+  setAdminCookie(res, createAdminSession(username))
   return res.status(200).json({
     success: true,
     authenticated: true,
