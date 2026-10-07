@@ -85,6 +85,8 @@ function App() {
   const [bookingOpen, setBookingOpen] = useState(false)
   const [galleryIndex, setGalleryIndex] = useState(null)
   const [reservationSent, setReservationSent] = useState(false)
+  const [bookingSubmitting, setBookingSubmitting] = useState(false)
+  const [bookingError, setBookingError] = useState('')
   const [testimonialIndex, setTestimonialIndex] = useState(0)
   const [activeSection, setActiveSection] = useState('home')
   const [scrolled, setScrolled] = useState(false)
@@ -152,15 +154,49 @@ function App() {
 
   const openBooking = () => {
     setReservationSent(false)
+    setBookingSubmitting(false)
+    setBookingError('')
     setBookingOpen(true)
   }
 
   const nextGallery = () => setGalleryIndex((current) => (current + 1) % gallery.length)
   const previousGallery = () => setGalleryIndex((current) => (current - 1 + gallery.length) % gallery.length)
 
-  const submitReservation = (event) => {
+  const submitReservation = async (event) => {
     event.preventDefault()
-    setReservationSent(true)
+    if (bookingSubmitting) return
+
+    setBookingSubmitting(true)
+    setBookingError('')
+
+    const formData = new FormData(event.currentTarget)
+    const payload = {
+      name: String(formData.get('name') || '').trim(),
+      date: String(formData.get('date') || ''),
+      time: String(formData.get('time') || ''),
+      guests: Number(formData.get('guests') || 0),
+      occasion: String(formData.get('occasion') || 'Dinner').trim(),
+      note: String(formData.get('note') || '').trim(),
+    }
+
+    try {
+      const response = await fetch('/api/bookings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(result.message || 'We could not complete the booking. Please try again.')
+      }
+
+      setReservationSent(true)
+    } catch (error) {
+      setBookingError(error instanceof Error ? error.message : 'We could not complete the booking. Please try again.')
+    } finally {
+      setBookingSubmitting(false)
+    }
   }
 
   return (
@@ -492,16 +528,19 @@ function App() {
                     </select>
                   </label>
                 </div>
-                <label>Anything we should know?<textarea name="note" rows="3" placeholder="Dietary needs, a high chair, a birthday candle…" /></label>
-                <button className="button button-solid full-width" type="submit">Request a table <ArrowRight size={17} /></button>
-                <small>We’ll confirm your reservation by phone or email. No payment is taken here.</small>
+                <label>Anything we should know?<textarea name="note" rows="3" maxLength="500" placeholder="Dietary needs, a high chair, a birthday candle…" /></label>
+                {bookingError && <p className="booking-error" role="alert">{bookingError}</p>}
+                <button className="button button-solid full-width" type="submit" disabled={bookingSubmitting}>
+                  {bookingSubmitting ? 'Booking…' : 'Request a table'} <ArrowRight size={17} />
+                </button>
+                <small>Your details are sent securely to the restaurant reservation system.</small>
               </form>
             ) : (
               <div className="booking-success">
                 <div className="success-icon"><Check size={28} /></div>
-                <p className="eyebrow">Request received</p>
-                <h3>We’ve got it.</h3>
-                <p>Thanks. This concept demo doesn’t send messages, but in a live booking flow your request would now reach the restaurant team.</p>
+                <p className="eyebrow">Reservation confirmed</p>
+                <h3>Successfully booked</h3>
+                <p>Your table request has been registered successfully.</p>
                 <button className="button button-outline" onClick={() => setBookingOpen(false)}>Back to the room</button>
               </div>
             )}
